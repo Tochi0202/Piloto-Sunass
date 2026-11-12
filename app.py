@@ -102,6 +102,10 @@ _FACTOR_FINDE = {"Hospital": 1.0, "Colegio": 0.02, "Comercio": 0.8,
 
 MESES = ["ene", "feb", "mar", "abr", "may", "jun", "jul", "ago", "sep", "oct", "nov", "dic"]
 DIAS = ["lunes", "martes", "miércoles", "jueves", "viernes", "sábado", "domingo"]
+# A quién le llega cada aviso (ruteo): el cliente solo ve lo que puede resolver él.
+#   fuga / caída sostenida → gestora del local (+ copia a Sedapal)
+#   medidor dañado, sin transmitir, retrocesos, antena caída → solo Sedapal (el cliente no se entera)
+CLIENTE_VE = {"FUGA_NOCTURNA", "CAIDA_SOSTENIDA"}
 ESTADOS = ["Detectada", "Asignada", "Avisada", "Verificada", "Cerrada"]
 RESPONSABLE = {"FUGA_NOCTURNA": "Gestora del local",
                "REVISION_MEDIDOR": "Sedapal (ESCE)",
@@ -830,7 +834,8 @@ def vista_cliente(maestro, lecturas, base, casos):
     # --- Acceso: link con código de caso, o código de suministro / DNI (simulado) ---
     qp = st.query_params
     # Lista de casos: primero las posibles fugas (tienen respuestas para la gestora), luego el resto.
-    orden = casos.assign(_o=casos["anomalia"].map(lambda a: 0 if a == "FUGA_NOCTURNA" else 1)).sort_values(["_o", "caso"])
+    casos_cliente = casos[casos["anomalia"].isin(CLIENTE_VE)]     # el cliente no ve casos internos de Sedapal
+    orden = casos_cliente.assign(_o=casos_cliente["anomalia"].map(lambda a: 0 if a == "FUGA_NOCTURNA" else 1)).sort_values(["_o", "caso"])
     codigos = orden["caso"].tolist()
     etiqueta_caso = dict(zip(orden["caso"], orden["caso"] + " · " + orden["anomalia"].map(NOMBRE_ANOMALIA)))
     caso_url = qp.get("caso")
@@ -851,7 +856,7 @@ def vista_cliente(maestro, lecturas, base, casos):
 
     info = base[base["suministro"] == sum_sel].iloc[0]
     tipo = info["tipo_local"]
-    caso = casos[casos["suministro"] == sum_sel]
+    caso = casos_cliente[casos_cliente["suministro"] == sum_sel]      # medidor/antena: no se muestran al cliente
     caso = caso.iloc[0] if len(caso) else None
 
     serie = serie_suministro(lecturas, sum_sel)
@@ -1025,6 +1030,58 @@ def vista_sedapal(maestro, base, casos, antenas):
         k5.metric("Alertas que acertaron", "—")
     st.caption("Reloj de AQUA TRACK: cuenta los días desde la detección hasta el cierre. "
                "Línea base del expediente: 5–7 meses sin revisión · Meta a validar: < 30 días.")
+
+    # --- Alertas nuevas para Sedapal: quién recibe qué (ruteo de avisos) ---
+    st.markdown("## Alertas para Sedapal")
+    st.caption("Cada aviso llega a quien puede actuar. Antena caída y medidor dañado: solo Sedapal (el cliente no se entera). "
+               "Fuga: la gestora del local, con copia a Sedapal para ver el volumen y los soles en riesgo.")
+    filas = []
+    if "ANTENA_CAIDA" in sel_caso:
+        dias_ant = c[c["anomalia"] == "ANTENA_CAIDA"].groupby("gateway")["dias_abiertos"].max()
+        for _, a_ in antenas[antenas["antena_caida"]].iterrows():
+            filas.append({"Tipo": "📡 Antena caída", "Dónde": a_["gateway"],
+                          "Qué pasó": f"{int(a_['en_silencio'])} de {int(a_['medidores'])} medidores sin transmitir hace más de 72 h",
+                          "Aviso a": "Comunicaciones · copia ESCE", "¿Cliente avisado?": "No (no corresponde)",
+                          "Días abiertos": int(dias_ant.get(a_["gateway"], 0)), "_o": 0})
+    otros = ab[ab["anomalia"] != "ANTENA_CAIDA"]
+    for _, r_ in otros.iterrows():
+        es_fuga = r_["anomalia"] in CLIENTE_VE
+        avisado = ESTADOS.index(r_["estado"]) >= ESTADOS.index("Avisada")
+        filas.append({"Tipo": ("💧 " if r_["anomalia"] == "FUGA_NOCTURNA" else "⚙️ ") + NOMBRE_ANOMALIA[r_["anomalia"]].split(" (")[0],
+                      "Dónde": f"{r_['suministro']} · {r_['tipo_local']}",
+                      "Qué pasó": (f"{_fmt_soles(r_['soles_riesgo'])} en riesgo" if r_["soles_riesgo"] > 0 else "por confirmar")
+                                  + f" · {r_['respuesta_cliente']}" if es_fuga else "Medidor por revisar",
+                      "Aviso a": "Gestora del local · copia ESCE" if es_fuga else "Sedapal (ESCE)",
+                      "¿Cliente avisado?": ("Sí" if avisado else "Pendiente") if es_fuga else "No (no corresponde)",
+                      "Días abiertos": int(r_["dias_abiertos"]), "_o": 1 if es_fuga else 2, "_p": r_["prioridad"]})
+    if filas:
+        al = pd.DataFrame(filas).sort_values(["_o", "Días abiertos"], ascending=[True, False]).drop(columns=["_o", "_p"], errors="ignore")
+        _df(al.head(300), hide_index=True, height=300)
+        st.caption(f"{len(al):,} alertas con los filtros elegidos (se muestran hasta 300).")
+    else:
+        st.info("No hay alertas con los filtros elegidos.")
+
+    with st.expander("Ver los mensajes simulados que recibe Sedapal"):
+        ant_c = antenas[antenas["antena_caida"]]
+        if len(ant_c):
+            a0 = ant_c.sort_values("pct_silencio", ascending=False).iloc[0]
+            st.markdown(f"""
+<div class="at-card"><span class="tag" style="background:{COLOR_ANOMALIA['ANTENA_CAIDA']};color:#fff">📡 ANTENA CAÍDA</span>
+<h4>Asunto: Antena {html.escape(a0['gateway'])} sin transmitir · {int(a0['en_silencio'])} medidores afectados</h4>
+<div class="que"><b>Para:</b> Comunicaciones de Sedapal &nbsp;·&nbsp; <b>Cc:</b> ESCE<br>
+La antena {html.escape(a0['gateway'])} dejó de recibir datos de {int(a0['en_silencio'])} de {int(a0['medidores'])} medidores hace más de 72 horas.
+Revise la antena. Sus lecturas no se interpretan como consumo cero. <b>No se avisó a los clientes.</b></div></div>""",
+                        unsafe_allow_html=True)
+        fu = c[(c["anomalia"] == "FUGA_NOCTURNA") & (c["estado"] != "Cerrada")].sort_values("soles_riesgo", ascending=False)
+        if len(fu):
+            f0 = fu.iloc[0]
+            st.markdown(f"""
+<div class="at-card"><span class="tag" style="background:{LILA}">💧 POSIBLE FUGA · COPIA</span>
+<h4>Asunto: Posible fuga · Caso {html.escape(f0['caso'])} · {html.escape(f0['tipo_local'])}</h4>
+<div class="que"><b>Para:</b> ESCE (copia) &nbsp;·&nbsp; Aviso principal: gestora del local<br>
+Se avisó a la gestora (suministro {html.escape(str(f0['suministro']))}). Consumo nocturno continuo, {_fmt_soles(f0['soles_riesgo'])} en riesgo,
+{int(f0['dias_abiertos'])} días abiertos. Si no hay respuesta, el ESCE decide el siguiente paso (plazo por definir).</div></div>""",
+                        unsafe_allow_html=True)
 
     # --- Mapa interactivo (pydeck, viene con Streamlit) ---
     st.markdown("## Mapa de casos abiertos")
