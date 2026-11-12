@@ -19,6 +19,7 @@ from __future__ import annotations
 import html
 from datetime import date, timedelta
 
+import altair as alt            # viene instalado con streamlit
 import numpy as np
 import pandas as pd
 import streamlit as st
@@ -99,6 +100,8 @@ _PERFIL = {
 _FACTOR_FINDE = {"Hospital": 1.0, "Colegio": 0.02, "Comercio": 0.8,
                  "Entidad pública": 0.1, "Industria": 0.6}
 
+MESES = ["ene", "feb", "mar", "abr", "may", "jun", "jul", "ago", "sep", "oct", "nov", "dic"]
+DIAS = ["lunes", "martes", "miércoles", "jueves", "viernes", "sábado", "domingo"]
 ESTADOS = ["Detectada", "Asignada", "Avisada", "Verificada", "Cerrada"]
 RESPONSABLE = {"FUGA_NOCTURNA": "Gestora del local",
                "SIN_TRANSMISION": "Sedapal (ESCE)",
@@ -538,7 +541,7 @@ def inyectar_css():
 /* Fondo y tipografía */
 .stApp {{ background: var(--crema); color: var(--azul); }}
 html, body, [class*="css"] {{ font-family: "Segoe UI", "Helvetica Neue", Arial, sans-serif; }}
-.block-container {{ padding-top: 2.2rem; max-width: 1280px; }}
+.block-container {{ padding: 2.2rem 3rem 3rem; max-width: 100% !important; }}
 
 /* Encabezados: estilo logo (relleno lila, contorno azul oscuro) */
 h1, h2, h3 {{ color: var(--azul); letter-spacing: .01em; }}
@@ -571,12 +574,42 @@ h3 {{ color: var(--violeta-doc); }}
 [data-testid="stSidebar"] [role="radiogroup"] label:has(input:checked) p {{ color: var(--azul) !important; font-weight: 800; }}
 [data-testid="stSidebar"] [data-baseweb="select"] * {{ color: var(--azul) !important; }}
 [data-testid="stSidebar"] input {{ color: var(--azul) !important; }}
+/* Campos (selectbox, multiselect, texto): fondo claro y texto azul oscuro, aunque el navegador esté en modo oscuro */
+[data-baseweb="select"] > div, [data-baseweb="input"], [data-baseweb="base-input"],
+[data-baseweb="input"] > div, [data-baseweb="select"] input {{ background: #fff !important; color: var(--azul) !important; }}
+[data-baseweb="select"] > div, [data-baseweb="input"] {{ border: 2.5px solid var(--azul) !important; border-radius: 10px !important; }}
+[data-baseweb="select"] *, [data-baseweb="input"] input {{ color: var(--azul) !important; -webkit-text-fill-color: var(--azul) !important; }}
+[data-baseweb="select"] svg {{ fill: var(--azul) !important; }}
+[data-baseweb="tag"] {{ background: var(--lila) !important; }}
+[data-baseweb="tag"] * {{ color: var(--azul) !important; }}
+/* Lista desplegable (se dibuja fuera de la página, en un popover) */
+[data-baseweb="popover"] [data-baseweb="menu"], [data-baseweb="popover"] ul {{ background: #fff !important; }}
+[data-baseweb="popover"] li, [data-baseweb="popover"] li * {{ color: var(--azul) !important; background: #fff; }}
+[data-baseweb="popover"] li:hover, [data-baseweb="popover"] li[aria-selected="true"] {{ background: var(--lila) !important; }}
+/* Casillas y etiquetas del área principal */
+.stApp [data-testid="stWidgetLabel"] p, .stApp [data-testid="stCheckbox"] p {{ color: var(--azul); }}
+[data-testid="stSidebar"] [data-testid="stWidgetLabel"] p {{ color: var(--crema) !important; }}
+/* Expanders de la barra lateral: fondo blanco → texto azul oscuro (legible) */
+[data-testid="stSidebar"] [data-testid="stExpander"] summary,
+[data-testid="stSidebar"] [data-testid="stExpander"] summary *,
+[data-testid="stSidebar"] [data-testid="stExpander"] p,
+[data-testid="stSidebar"] [data-testid="stExpander"] span,
+[data-testid="stSidebar"] [data-testid="stExpander"] label,
+[data-testid="stSidebar"] [data-testid="stExpander"] td,
+[data-testid="stSidebar"] [data-testid="stExpander"] th,
+[data-testid="stSidebar"] [data-testid="stExpander"] small,
+[data-testid="stSidebar"] [data-testid="stExpander"] [data-testid="stCaptionContainer"] * {{ color: var(--azul) !important; }}
+[data-testid="stSidebar"] [data-testid="stExpander"] summary svg {{ fill: var(--azul) !important; }}
+[data-testid="stSidebar"] [data-testid="stExpander"] summary {{ font-weight: 700; }}
 
 /* Métricas */
 [data-testid="stMetric"] {{ background: #fff; border: 2.5px solid var(--azul); border-left: 10px solid var(--lila);
   border-radius: 12px; padding: .8rem 1rem; box-shadow: 4px 4px 0 var(--violeta); }}
+[data-testid="stMetricLabel"], [data-testid="stMetricLabel"] * {{ white-space: normal !important; overflow: visible !important; text-overflow: clip !important; }}
 [data-testid="stMetricLabel"] p {{ color: var(--violeta-doc); font-weight: 700; font-size: .85rem; }}
-[data-testid="stMetricValue"] {{ color: var(--azul); font-weight: 900; }}
+[data-testid="stMetricValue"], [data-testid="stMetricValue"] * {{ color: var(--azul); font-weight: 900; white-space: normal !important;
+  overflow: visible !important; text-overflow: clip !important; }}
+[data-testid="stMetricValue"] {{ font-size: clamp(1.3rem, 1.9vw, 2.1rem); line-height: 1.15; }}
 
 /* Botones */
 .stButton > button, .stDownloadButton > button {{ background: var(--verde); color: var(--azul);
@@ -614,6 +647,20 @@ h3 {{ color: var(--violeta-doc); }}
 .at-reloj {{ display:inline-block; background:var(--azul); color:var(--verde); font-weight:800;
   padding:.25rem .8rem; border-radius:8px; margin-top:.3rem; }}
 
+/* Independiente del modo claro/oscuro del navegador: superficies claras y texto oscuro explícitos */
+[data-testid="stHeader"] {{ background: transparent; }}
+[data-testid="stMain"], [data-testid="stMain"] p, [data-testid="stMain"] li,
+[data-testid="stMain"] label, [data-testid="stMain"] h1, [data-testid="stMain"] h2 {{ color: var(--azul); }}
+[data-testid="stMain"] [data-testid="stCaptionContainer"], [data-testid="stMain"] [data-testid="stCaptionContainer"] * {{ color: #4a4f5c !important; }}
+.at-hero p, .at-hero .at-pill {{ color: inherit; }}
+.at-hero h1 {{ color: var(--lila) !important; }}
+.at-hero p {{ color: var(--crema) !important; }}
+[data-testid="stProgress"] [role="progressbar"] > div, [data-testid="stProgress"] div[data-baseweb="progress-bar"] > div > div {{ background: var(--violeta) !important; }}
+[data-testid="stAlert"] * {{ color: var(--azul) !important; }}
+/* Pestañas */
+.stTabs [data-baseweb="tab"], .stTabs [data-baseweb="tab"] * {{ color: var(--azul) !important; font-weight: 700; }}
+.stTabs [data-baseweb="tab-highlight"] {{ background: var(--violeta-doc) !important; height: 4px; }}
+.stTabs [data-baseweb="tab-border"] {{ background: var(--azul) !important; opacity: .25; }}
 /* Tablas y pestañas */
 [data-testid="stDataFrame"] {{ border: 2.5px solid var(--azul); border-radius: 10px; overflow: hidden; }}
 .stTabs [data-baseweb="tab"] {{ font-weight: 700; color: var(--azul); }}
@@ -637,6 +684,20 @@ def _df(df, **kw):
         st.dataframe(df, width="stretch", **kw)
     except Exception:
         st.dataframe(df, use_container_width=True, **kw)
+
+
+def _grafico(chart, alto: int = 320):
+    """Gráfico con colores explícitos: se ve igual en modo claro y oscuro (no hereda el tema)."""
+    chart = (chart.properties(height=alto)
+             .configure(background="#FFFFFF")
+             .configure_view(stroke=None)
+             .configure_axis(labelColor=AZUL_OSCURO, titleColor=AZUL_OSCURO, gridColor="#E6DAE1",
+                             domainColor=AZUL_OSCURO, tickColor=AZUL_OSCURO)
+             .configure_legend(labelColor=AZUL_OSCURO, titleColor=AZUL_OSCURO, orient="top"))
+    try:
+        st.altair_chart(chart, theme=None, width="stretch")
+    except Exception:
+        st.altair_chart(chart, theme=None, use_container_width=True)
 
 
 def _fmt(x, dec=0):
@@ -800,7 +861,14 @@ def vista_cliente(maestro, lecturas, base, casos):
     t1, t2 = st.tabs(["Consumo diario (m³)", "Huella por horario"])
     with t1:
         ult = d[d.index > pd.Timestamp(FECHA_CORTE) - pd.Timedelta(days=45)]
-        st.bar_chart(ult.rename("m³ por día"), color=VIOLETA)
+        dfc = ult.rename_axis("fecha").reset_index(name="m3")
+        dfc["día"] = dfc["fecha"].map(lambda f: f"{f.day} {MESES[f.month - 1]}")      # etiquetas en español
+        dfc["dia_sem"] = dfc["fecha"].map(lambda f: DIAS[f.weekday()])
+        _grafico(alt.Chart(dfc).mark_bar(color=VIOLETA).encode(
+            x=alt.X("día:N", title="Día", sort=None, axis=alt.Axis(labelAngle=-60, labelOverlap=True)),
+            y=alt.Y("m3:Q", title="Consumo (m³ por día)"),
+            tooltip=[alt.Tooltip("día:N", title="Día"), alt.Tooltip("dia_sem:N", title="Día de la semana"),
+                     alt.Tooltip("m3:Q", title="Consumo (m³)", format=".1f")]))
     with t2:
         v = serie.dropna(subset=["m3"]).copy()
         v["franja"] = v["hora_fin"].map(lambda h: f"{(h - 3) % 24:02d}–{(h - 1) % 24 + 1:02d} h")
@@ -808,7 +876,14 @@ def vista_cliente(maestro, lecturas, base, casos):
         hist = v[v["ts"] <= corte_sem].groupby("franja")["m3"].mean()
         rec = v[v["ts"] > corte_sem].groupby("franja")["m3"].mean()
         h = pd.DataFrame({"Historial propio": hist, "Últimos 7 días": rec}).sort_index()
-        st.line_chart(h, color=[VIOLETA, ALERTA_ROJO])
+        hl = h.rename_axis("franja").reset_index().melt("franja", var_name="serie", value_name="m3")
+        _grafico(alt.Chart(hl).mark_line(point=True, strokeWidth=3).encode(
+            x=alt.X("franja:N", title="Franja horaria (cada 3 h)", sort=None, axis=alt.Axis(labelAngle=-45)),
+            y=alt.Y("m3:Q", title="Consumo promedio (m³ por tramo)"),
+            color=alt.Color("serie:N", title=None, scale=alt.Scale(
+                domain=["Historial propio", "Últimos 7 días"], range=[VIOLETA, ALERTA_ROJO])),
+            tooltip=[alt.Tooltip("franja:N", title="Franja"), alt.Tooltip("serie:N", title="Serie"),
+                     alt.Tooltip("m3:Q", title="Consumo (m³)", format=".2f")]))
         st.caption("Promedio de m³ por franja de 3 h. Si la línea roja queda sobre la violeta en la "
                    "madrugada (00–06 h), algo consume agua cuando el local debería estar quieto.")
 
@@ -841,9 +916,9 @@ def vista_sedapal(maestro, base, casos, antenas):
     # --- KPIs críticos ---
     k1, k2, k3, k4, k5 = st.columns(5)
     k1.metric("Casos sin cerrar", _fmt(len(ab)))
-    k2.metric("Días abiertos (promedio)", f"{ab['dias_abiertos'].mean():.0f}" if len(ab) else "0",
+    k2.metric("Días abiertos (prom.)", f"{ab['dias_abiertos'].mean():.0f}" if len(ab) else "0",
               help=f"Máximo: {ab['dias_abiertos'].max():.0f} días." if len(ab) else None)
-    k3.metric("Soles en riesgo", _fmt_soles(ab["soles_riesgo"].sum()))
+    k3.metric("Soles en riesgo", f"S/ {ab['soles_riesgo'].sum():,.0f}")
     k4.metric("m³ en riesgo", _fmt(ab["m3_riesgo"].sum(), 0))
     cerr = c[c["estado"] == "Cerrada"]
     if len(cerr):
@@ -860,11 +935,11 @@ def vista_sedapal(maestro, base, casos, antenas):
     import pydeck as pdk
     mp = ab.copy()
     mp["color"] = mp["anomalia"].map(lambda a: [int(COLOR_ANOMALIA[a][i:i + 2], 16) for i in (1, 3, 5)] + [220])
-    mp["radio"] = 250 + 60 * np.sqrt(mp["soles_riesgo"].clip(lower=1))
+    mp["radio"] = 100 + 10 * np.sqrt(mp["soles_riesgo"].clip(lower=1))
     mp["tipo_txt"] = mp["anomalia"].map(NOMBRE_ANOMALIA)
     mp["riesgo_txt"] = mp["soles_riesgo"].map(lambda x: f"S/ {x:,.0f}")
     capas = [pdk.Layer("ScatterplotLayer", data=mp, get_position="[lon, lat]", get_fill_color="color",
-                       get_radius="radio", pickable=True, stroked=True, get_line_color=[35, 46, 56],
+                       get_radius="radio", radius_min_pixels=5, radius_max_pixels=26, pickable=True, stroked=True, get_line_color=[35, 46, 56],
                        line_width_min_pixels=2, opacity=0.85)]
     ant = antenas.copy()
     ant["caida_txt"] = np.where(ant["antena_caida"], "caída", "operativa")
@@ -875,12 +950,16 @@ def vista_sedapal(maestro, base, casos, antenas):
                                get_fill_color=[0, 0, 0, 0], get_line_color=[214, 51, 108, 255],
                                get_radius=2200, stroked=True, line_width_min_pixels=3, pickable=False))
     vista = pdk.ViewState(latitude=-12.06, longitude=-77.03, zoom=9.6, pitch=0)
-    st.pydeck_chart(pdk.Deck(
+    deck = pdk.Deck(
         layers=capas, initial_view_state=vista,
         map_style="https://basemaps.cartocdn.com/gl/positron-gl-style/style.json",
         tooltip={"html": "<b>{caso}</b> · {tipo_local}<br/>{tipo_txt}<br/>Estado: {estado} · {dias_abiertos} d abiertos"
                          "<br/>En riesgo: {riesgo_txt}<br/>Responsable: {responsable}",
-                 "style": {"backgroundColor": AZUL_OSCURO, "color": CREMA}}))
+                 "style": {"backgroundColor": AZUL_OSCURO, "color": CREMA}})
+    try:
+        st.pydeck_chart(deck, height=560)
+    except TypeError:                      # versiones antiguas de Streamlit sin parámetro height
+        st.pydeck_chart(deck)
     leyenda = "".join(f'<span><i style="background:{COLOR_ANOMALIA[a]}"></i>{html.escape(NOMBRE_ANOMALIA[a])}</span>'
                       for a in NOMBRE_ANOMALIA)
     st.markdown(f'<div class="at-leyenda">{leyenda}<span><i style="background:transparent;border-color:{ALERTA_ROJO}"></i>'
