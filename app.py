@@ -905,13 +905,19 @@ def vista_sedapal(maestro, base, casos, antenas):
     abiertos = c[c["estado"] != "Cerrada"]
 
     # --- Filtros ---
+    # Filtro principal: tipo de caso (afecta mapa, KPIs y tablas). Entre paréntesis, casos abiertos.
+    conteo = abiertos["anomalia"].value_counts()
+    sel_caso = st.multiselect(
+        "Tipo de caso (elige uno o varios para filtrar el mapa)", list(NOMBRE_ANOMALIA),
+        default=list(NOMBRE_ANOMALIA),
+        format_func=lambda k: f"{NOMBRE_ANOMALIA[k]} ({int(conteo.get(k, 0))})")
     f1, f2, f3 = st.columns(3)
     sel_tipo = f1.multiselect("Tipo de local", list(PRIORIDAD_LOCAL), default=list(PRIORIDAD_LOCAL))
     sel_resp = f2.multiselect("Responsable", sorted(RESPONSABLE.values()),
                               default=sorted(RESPONSABLE.values()))
     sel_est = f3.multiselect("Estado", ESTADOS[:-1], default=ESTADOS[:-1])
-    ab = abiertos[abiertos["tipo_local"].isin(sel_tipo) & abiertos["responsable"].isin(sel_resp)
-                  & abiertos["estado"].isin(sel_est)]
+    ab = abiertos[abiertos["anomalia"].isin(sel_caso) & abiertos["tipo_local"].isin(sel_tipo)
+                  & abiertos["responsable"].isin(sel_resp) & abiertos["estado"].isin(sel_est)]
 
     # --- KPIs críticos ---
     k1, k2, k3, k4, k5 = st.columns(5)
@@ -945,7 +951,8 @@ def vista_sedapal(maestro, base, casos, antenas):
     ant["caida_txt"] = np.where(ant["antena_caida"], "caída", "operativa")
     ant["color"] = ant["antena_caida"].map(lambda x: [214, 51, 108, 255] if x else [109, 97, 235, 90])
     ant_caidas = ant[ant["antena_caida"]]
-    if len(ant_caidas):
+    ver_antenas = st.checkbox("Mostrar círculos de antenas caídas", value=True)
+    if len(ant_caidas) and ver_antenas:
         capas.append(pdk.Layer("ScatterplotLayer", data=ant_caidas, get_position="[lon, lat]",
                                get_fill_color=[0, 0, 0, 0], get_line_color=[214, 51, 108, 255],
                                get_radius=2200, stroked=True, line_width_min_pixels=3, pickable=False))
@@ -961,10 +968,13 @@ def vista_sedapal(maestro, base, casos, antenas):
     except TypeError:                      # versiones antiguas de Streamlit sin parámetro height
         st.pydeck_chart(deck)
     leyenda = "".join(f'<span><i style="background:{COLOR_ANOMALIA[a]}"></i>{html.escape(NOMBRE_ANOMALIA[a])}</span>'
-                      for a in NOMBRE_ANOMALIA)
+                      for a in NOMBRE_ANOMALIA if a in sel_caso)
     st.markdown(f'<div class="at-leyenda">{leyenda}<span><i style="background:transparent;border-color:{ALERTA_ROJO}"></i>'
                 f'Antena caída (círculo)</span></div>', unsafe_allow_html=True)
-    st.caption("Tamaño del punto = soles en riesgo. Coordenadas simuladas.")
+    st.caption(f"{len(ab):,} casos en el mapa. Tamaño del punto = soles en riesgo. Coordenadas simuladas. "
+               "Acerca el mapa con la rueda del mouse o los botones + y −.")
+    if not len(ab):
+        st.warning("No hay casos con los filtros elegidos. Agrega un tipo de caso.")
 
     # --- Tabla de confiabilidad ---
     st.markdown("## Tabla de confiabilidad")
