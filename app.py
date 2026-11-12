@@ -806,7 +806,10 @@ def vista_cliente(maestro, lecturas, base, casos):
 
     # --- Acceso: link con código de caso, o código de suministro / DNI (simulado) ---
     qp = st.query_params
-    codigos = casos["caso"].tolist()
+    # Lista de casos: primero las posibles fugas (tienen respuestas para la gestora), luego el resto.
+    orden = casos.assign(_o=casos["anomalia"].map(lambda a: 0 if a == "FUGA_NOCTURNA" else 1)).sort_values(["_o", "caso"])
+    codigos = orden["caso"].tolist()
+    etiqueta_caso = dict(zip(orden["caso"], orden["caso"] + " · " + orden["anomalia"].map(NOMBRE_ANOMALIA)))
     caso_url = qp.get("caso")
     with st.sidebar:
         st.markdown("**Entrar a mi local**")
@@ -814,7 +817,8 @@ def vista_cliente(maestro, lecturas, base, casos):
                         label_visibility="collapsed")
         if modo == "Link del aviso":
             pref = codigos.index(caso_url) if caso_url in codigos else 0
-            elegido = st.selectbox("Caso (el link trae este código)", codigos, index=pref)
+            elegido = st.selectbox("Caso (el link trae este código)", codigos, index=pref,
+                                   format_func=lambda k: etiqueta_caso[k])
             fila = casos[casos["caso"] == elegido].iloc[0]
             sum_sel = fila["suministro"]
         else:
@@ -892,6 +896,9 @@ def vista_cliente(maestro, lecturas, base, casos):
 
         # Respuesta opcional de un toque (el sistema funciona aunque no responda)
         opciones = OPCIONES_POR_ANOMALIA[caso["anomalia"]]
+        if not opciones:
+            st.info("Para este caso no necesita responder: lo atiende Sedapal. "
+                    "Para probar las respuestas, elija en el menú lateral un caso de «Posible fuga».")
         if opciones:
             st.caption("Opcional · un toque. Si no responde, el caso sigue su curso igual.")
             bcols = st.columns(len(opciones))
@@ -900,6 +907,10 @@ def vista_cliente(maestro, lecturas, base, casos):
                     st.session_state.setdefault("respuestas", {})[caso["caso"]] = k
         resp_k = st.session_state.get("respuestas", {}).get(caso["caso"])
         if resp_k:
+            if st.button("↩ Volver al inicio (deshacer mi respuesta)", key=f"reset_{caso['caso']}"):
+                st.session_state.get("respuestas", {}).pop(caso["caso"], None)
+                st.session_state.get("sedapal", {}).pop(caso["caso"], None)
+                st.rerun()
             st.success(f"Su respuesta quedó registrada: {OPCIONES_RESPUESTA[resp_k][1]}. "
                        + MENSAJE_RESPUESTA[resp_k].format(caso=caso["caso"]))
 
@@ -1131,6 +1142,10 @@ def main():
 
     with st.sidebar:
         st.markdown("---")
+        if st.button("↩ Reiniciar demo (todos los casos)"):
+            st.session_state["respuestas"] = {}
+            st.session_state["sedapal"] = {}
+            st.rerun()
         with st.expander("Reglas del motor (umbrales)"):
             st.table(pd.DataFrame({"Umbral": list(UMBRALES), "Valor": [str(v) for v in UMBRALES.values()]}))
         with st.expander("Datos simulados vs. expediente"):
