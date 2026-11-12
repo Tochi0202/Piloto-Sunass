@@ -62,8 +62,8 @@ UMBRALES = {
     "frac_gateway_caida": 0.60,  # ≥60 % de los medidores de una antena callados a la vez
     "min_medidores_gateway": 5,
     "caida_sostenida": 0.50,     # últimos 10 días ≤ 50 % del nivel previo → cierre/cambio de uso
-    "nota_baja": 50,             # nota de confiabilidad < 50 → revisión Sedapal
-    "nota_media": 80,
+    "nota_no_confiable": 40,     # confiabilidad < 40 → 🔴 No confiable: no alerta al cliente, va a Sedapal
+    "nota_revisar": 70,          # 40–69 → 🟡 Revisar · ≥70 → 🟢 Confiable
 }
 
 # Share nocturno (00–06 h / consumo diario) ESPERADO por tipo de local.
@@ -109,6 +109,7 @@ RESPONSABLE = {"FUGA_NOCTURNA": "Gestora del local",
                "MEDIDOR_DETENIDO": "Sedapal (ESCE)",
                "MEDIDOR_RETROCESOS": "Sedapal (ESCE)",
                "ANTENA_CAIDA": "Comunicaciones"}
+NIVEL_ETIQUETA = {"Confiable": "🟢 Confiable", "Revisar": "🟡 Revisar", "No confiable": "🔴 No confiable"}
 NOMBRE_ANOMALIA = {"FUGA_NOCTURNA": "Posible fuga (consumo nocturno continuo)",
                    "SIN_TRANSMISION": "Medidor sin transmitir (>72 h)",
                    "CAIDA_SOSTENIDA": "Caída sostenida (¿cierre o cambio de uso?)",
@@ -306,10 +307,13 @@ def consumo_diario(serie: pd.DataFrame, corte: pd.Timestamp) -> pd.Series:
 
 
 def regla_firma_medidor(lec: pd.DataFrame, maestro: pd.DataFrame, corte: pd.Timestamp) -> pd.DataFrame:
-    """AQUA TRUST — nota de confiabilidad 0–100 por suministro (firma del medidor).
+    """AQUA TRUST — Confiabilidad del medidor (0–100) por suministro (firma del medidor).
 
-    Penaliza: índice plano, retrocesos, horas sin transmitir, transmisión incompleta.
-    Un medidor con nota baja va a revisión de Sedapal; no se interpreta "sin lectura" como cero.
+    Se parte de 100 y se descuentan puntos con reglas simples y explicables:
+      índice plano ≥30 d −60 (−10 más si es plano toda la serie) · retrocesos −7 c/u (máx. −65)
+      · >72 h sin transmitir −35 · transmite <75 % de los días −30.
+    🟢 Confiable 70–100 · 🟡 Revisar 40–69 · 🔴 No confiable 0–39 (no alerta al cliente; va a Sedapal).
+    Nunca se interpreta "sin lectura" como "consumo cero".
     """
     u = UMBRALES
     g = lec.groupby("suministro")
@@ -332,13 +336,13 @@ def regla_firma_medidor(lec: pd.DataFrame, maestro: pd.DataFrame, corte: pd.Time
     nota = np.full(len(r), 100.0)
     nota -= np.where(r["dias_plano"] >= u["dias_congelado"], 60, 0)       # firma: índice plano
     nota -= np.where(r["plano_total"], 10, 0)                              # plano toda la serie
-    nota -= np.minimum(55, r["retrocesos"] * 6)                            # firma: retrocesos
-    nota -= np.where(r["horas_sin_tx"] > u["horas_sin_transmitir"], 25, 0) # no transmite
-    nota -= np.where(r["pct_dias_tx"] < 0.75, 15, 0)                       # transmisión incompleta
+    nota -= np.minimum(65, r["retrocesos"] * 7)                            # firma: retrocesos
+    nota -= np.where(r["horas_sin_tx"] > u["horas_sin_transmitir"], 35, 0) # no transmite
+    nota -= np.where(r["pct_dias_tx"] < 0.75, 30, 0)                       # transmisión incompleta
     r["nota_confiabilidad"] = np.clip(nota, 0, 100).round(0).astype(int)
     r["nivel_confiabilidad"] = pd.cut(r["nota_confiabilidad"],
-                                      [-1, u["nota_baja"] - 1, u["nota_media"] - 1, 100],
-                                      labels=["Baja", "Media", "Alta"])
+                                      [-1, u["nota_no_confiable"] - 1, u["nota_revisar"] - 1, 100],
+                                      labels=["No confiable", "Revisar", "Confiable"])
     def motivo(x):
         m = []
         if x.dias_plano >= u["dias_congelado"]:
@@ -463,7 +467,7 @@ def correr_motor(seed: int = 2026):
     base["plano"] = base["dias_plano"] >= u["dias_congelado"]
     base["sin_tx"] = base["horas_sin_tx"] > u["horas_sin_transmitir"]
     base["retro_alto"] = base["retrocesos"] >= 5
-    base["nota_baja"] = base["nota_confiabilidad"] < u["nota_baja"]
+    base["no_confiable"] = base["nota_confiabilidad"] < u["nota_no_confiable"]
 
     # ---- Clasificación con precedencia explicable ----------------------------
     # 1) antena caída → comunicaciones (no culpar al medidor ni al cliente)
@@ -475,13 +479,13 @@ def correr_motor(seed: int = 2026):
             return "ANTENA_CAIDA"
         if x.plano:
             return "MEDIDOR_DETENIDO"
-        if x.nota_baja and x.retro_alto:
+        if x.no_confiable and x.retro_alto:
             return "MEDIDOR_RETROCESOS"
         if x.sin_tx:                    # sin lecturas recientes no se alerta al cliente con datos viejos
             return "SIN_TRANSMISION"
-        if x.fuga_nocturna and not x.nota_baja:
+        if x.fuga_nocturna and not x.no_confiable:
             return "FUGA_NOCTURNA"
-        if x.caida_sostenida and not x.nota_baja:
+        if x.caida_sostenida and not x.no_confiable:
             return "CAIDA_SOSTENIDA"
         return None
     base["anomalia"] = base.apply(clasificar, axis=1)
@@ -731,6 +735,56 @@ ACCION = {
 }
 
 
+# Respuesta opcional de un toque. La del cliente NUNCA marca "Verificada": eso lo confirma Sedapal.
+# clave: (texto del botón, cómo se registra, estado mínimo al que lleva el caso)
+OPCIONES_RESPUESTA = {
+    "repare": ("🔧 Encontré y reparé una fuga", "Reportó que encontró y reparó una fuga", "Avisada"),
+    "nada": ("🔍 Revisé y no encontré nada", "Revisó y no encontró nada · posible falsa alarma", "Avisada"),
+    "sin_uso": ("🏫 El local no usa agua", "Informó que el local no usa agua (cerrado o sin uso)", "Avisada"),
+    "usa": ("✅ El local sí usa agua con normalidad", "Confirmó que el local usa agua con normalidad", "Avisada"),
+    "ayuda": ("🙋 Necesito ayuda", "Pidió ayuda: el caso pasa a Sedapal", "Asignada"),
+}
+OPCIONES_POR_ANOMALIA = {
+    "FUGA_NOCTURNA": ["repare", "nada", "sin_uso", "ayuda"],
+    "CAIDA_SOSTENIDA": ["sin_uso", "usa", "ayuda"],
+    "MEDIDOR_DETENIDO": ["usa", "sin_uso", "ayuda"],
+    "SIN_TRANSMISION": ["usa", "ayuda"],
+    "MEDIDOR_RETROCESOS": ["ayuda"],
+    "ANTENA_CAIDA": [],
+}
+MENSAJE_RESPUESTA = {
+    "repare": "Sedapal lo confirmará con las próximas lecturas: si el consumo de madrugada baja, el caso se cierra como fuga confirmada.",
+    "nada": "Sedapal revisará el medidor para confirmar si fue una falsa alarma. Si no está de acuerdo, puede presentar un "
+            "reclamo por el canal oficial de Sedapal citando el código del caso {caso}. AQUA TRACK no reemplaza el reclamo formal.",
+    "sin_uso": "Lo registramos. Sedapal lo contrastará con las lecturas.",
+    "usa": "Lo registramos: Sedapal revisará el medidor.",
+    "ayuda": "El caso pasa a Sedapal para que lo atienda un responsable.",
+}
+
+
+def aplicar_estado(c: pd.DataFrame) -> pd.DataFrame:
+    """Aplica a los casos lo hecho en la demo: respuesta del cliente (sube a 'Avisada' o 'Asignada')
+    y acciones de Sedapal ('Verificada' o 'Cerrada'). El estado nunca retrocede."""
+    c = c.copy()
+    resp = st.session_state.get("respuestas", {})
+    sed = st.session_state.get("sedapal", {})
+    c["respuesta_cliente"] = c["caso"].map(lambda k: OPCIONES_RESPUESTA[resp[k]][1] if k in resp else "—")
+
+    def est(row):
+        i = ESTADOS.index(row["estado"])
+        if row["caso"] in resp:
+            i = max(i, ESTADOS.index(OPCIONES_RESPUESTA[resp[row["caso"]]][2]))
+        if row["caso"] in sed:
+            i = max(i, ESTADOS.index(sed[row["caso"]]["estado"]))
+        return ESTADOS[i]
+    if len(c):
+        c["estado"] = c.apply(est, axis=1)
+    for k, v in sed.items():
+        if v.get("resultado"):
+            c.loc[c["caso"] == k, "resultado_cierre"] = v["resultado"]
+    return c
+
+
 def linea_tiempo(estado: str, dias: int, caso: str, responsable: str):
     i = ESTADOS.index(estado)
     pasos = []
@@ -837,24 +891,27 @@ def vista_cliente(maestro, lecturas, base, casos):
 </div>""", unsafe_allow_html=True)
 
         # Respuesta opcional de un toque (el sistema funciona aunque no responda)
-        st.caption("Opcional · un toque. Si no responde, el caso sigue su curso igual.")
-        b1, b2, b3 = st.columns(3)
-        if "respuestas" not in st.session_state:
-            st.session_state["respuestas"] = {}
-        if b1.button("🔧 Ya lo revisé", key=f"rev_{caso['caso']}"):
-            st.session_state["respuestas"][caso["caso"]] = "Verificada"
-        if b2.button("🏫 El local no usa agua", key=f"sin_{caso['caso']}"):
-            st.session_state["respuestas"][caso["caso"]] = "Verificada"
-        if b3.button("🙋 Necesito ayuda", key=f"ayu_{caso['caso']}"):
-            st.session_state["respuestas"][caso["caso"]] = "Asignada"
+        opciones = OPCIONES_POR_ANOMALIA[caso["anomalia"]]
+        if opciones:
+            st.caption("Opcional · un toque. Si no responde, el caso sigue su curso igual.")
+            bcols = st.columns(len(opciones))
+            for k, col in zip(opciones, bcols):
+                if col.button(OPCIONES_RESPUESTA[k][0], key=f"{k}_{caso['caso']}"):
+                    st.session_state.setdefault("respuestas", {})[caso["caso"]] = k
+        resp_k = st.session_state.get("respuestas", {}).get(caso["caso"])
+        if resp_k:
+            st.success(f"Su respuesta quedó registrada: {OPCIONES_RESPUESTA[resp_k][1]}. "
+                       + MENSAJE_RESPUESTA[resp_k].format(caso=caso["caso"]))
 
     # --- Rastreo del caso ---
     st.markdown("## Rastreo del caso")
     if caso is None:
         st.info("No hay un caso abierto para este suministro.")
     else:
-        estado = st.session_state.get("respuestas", {}).get(caso["caso"], caso["estado"])
-        linea_tiempo(estado, int(caso["dias_abiertos"]), caso["caso"], caso["responsable"])
+        fila_c = aplicar_estado(casos[casos["caso"] == caso["caso"]]).iloc[0]
+        linea_tiempo(fila_c["estado"], int(caso["dias_abiertos"]), caso["caso"], caso["responsable"])
+        st.caption(f"Respuesta del cliente: {fila_c['respuesta_cliente']}. «Verificada» la marca Sedapal (ESCE) al "
+                   "confirmar el hallazgo; la respuesta del cliente no se salta ese paso.")
 
     # --- Gráficas: consumo diario y huella horaria (por qué es raro) ---
     st.markdown("## Su consumo")
@@ -896,12 +953,8 @@ def vista_sedapal(maestro, base, casos, antenas):
           "Casos abiertos con dueño y reloj, soles en riesgo y medidores que no son confiables.",
           "VISTA B")
 
-    # Aplicar respuestas del cliente / cierres hechos en la demo
-    c = casos.copy()
-    for k, v in st.session_state.get("respuestas", {}).items():
-        c.loc[c["caso"] == k, "estado"] = v
-    for k in st.session_state.get("cerrados", []):
-        c.loc[c["caso"] == k, "estado"] = "Cerrada"
+    # Aplicar respuestas del cliente y acciones de Sedapal hechas en la demo
+    c = aplicar_estado(casos)
     abiertos = c[c["estado"] != "Cerrada"]
 
     # --- Filtros ---
@@ -928,7 +981,7 @@ def vista_sedapal(maestro, base, casos, antenas):
     k4.metric("m³ en riesgo", _fmt(ab["m3_riesgo"].sum(), 0))
     cerr = c[c["estado"] == "Cerrada"]
     if len(cerr):
-        acierto = (cerr["resultado_cierre"] != "Falsa alarma").mean()
+        acierto = cerr["resultado_cierre"].isin(["Fuga confirmada", "Medidor reparado"]).mean()
         k5.metric("Alertas que acertaron", f"{acierto:.0%}",
                   help=f"{len(cerr)} cierres (simulados). Hoy Sedapal no mide esto; cada cierre registra el resultado y recalibra los umbrales.")
     else:
@@ -977,35 +1030,51 @@ def vista_sedapal(maestro, base, casos, antenas):
         st.warning("No hay casos con los filtros elegidos. Agrega un tipo de caso.")
 
     # --- Tabla de confiabilidad ---
-    st.markdown("## Tabla de confiabilidad")
-    st.caption("Prioridad: hospitales y colegios primero, luego nota de confiabilidad más baja. "
-               "AQUA TRUST = nota del medidor · AQUA CLUSTER = falla de antena.")
+    st.markdown("## Confiabilidad del medidor")
+    st.caption("Nota de 0 a 100 que dice cuánto se puede confiar en los datos de cada medidor. "
+               "Prioridad: hospitales y colegios primero, luego la confiabilidad más baja. "
+               "AQUA TRUST = confiabilidad del medidor · AQUA CLUSTER = falla de antena.")
+    with st.expander("¿Cómo se calcula la confiabilidad?"):
+        st.markdown("""
+**Niveles**
+- 🟢 **Confiable (70–100):** sus datos sirven para detectar fugas.
+- 🟡 **Revisar (40–69):** hay fallas de transmisión o lecturas raras.
+- 🔴 **No confiable (0–39):** no se usa para alertar al cliente; va a revisión de Sedapal.
+
+**Cómo se calcula:** se parte de 100 y se descuentan puntos con reglas simples y explicables.
+""")
+        st.table(pd.DataFrame({
+            "Señal del medidor": ["Índice sin cambio por 30 días o más", "Índice sin cambio en toda la serie (adicional)",
+                                  "Retrocesos (lecturas que bajan)", "Más de 72 h sin transmitir",
+                                  "Transmite menos del 75 % de los días"],
+            "Puntos que resta": ["−60", "−10", "−7 por cada retroceso (máx. −65)", "−35", "−30"]}))
+        st.caption("Pesos propuestos por el equipo; se calibran con el ESCE. Sin lectura nunca se interpreta como consumo cero.")
     tb = base.copy()
-    tb["AQUA CLUSTER"] = np.where(tb["antena_caida"] & tb["sin_tx"], "📡 Antena caída", "")
-    tb["AQUA TRUST"] = np.where(tb["nota_baja"], "⚠️ Nota baja", np.where(tb["nivel_confiabilidad"] == "Media", "Media", "OK"))
+    tb["Antena (AQUA CLUSTER)"] = np.where(tb["antena_caida"] & tb["sin_tx"], "📡 Antena caída", "")
+    tb["Nivel (AQUA TRUST)"] = tb["nivel_confiabilidad"].astype(str).map(NIVEL_ETIQUETA)
     tb["prioridad"] = tb["tipo_local"].map(PRIORIDAD_LOCAL)
     cA, cB, cC = st.columns([2, 2, 3])
-    solo_exc = cA.checkbox("Solo excepciones del motor", value=True)
+    solo_exc = cA.checkbox("Solo medidores por revisar o con antena caída", value=True)
     solo_prio = cB.checkbox("Solo hospitales y colegios", value=False)
     buscar = cC.text_input("Buscar suministro o antena", placeholder="Suministro_0012 o GW-07")
     if solo_exc:
-        tb = tb[tb["antena_caida"] & tb["sin_tx"] | tb["nota_baja"]]
+        tb = tb[(tb["nivel_confiabilidad"].astype(str) != "Confiable") | (tb["antena_caida"] & tb["sin_tx"])]
     if solo_prio:
         tb = tb[tb["tipo_local"].isin(["Hospital", "Colegio"])]
     if buscar:
         b = buscar.strip().lower()
         tb = tb[tb["suministro"].str.lower().str.contains(b, regex=False) | tb["gateway"].str.lower().str.contains(b, regex=False)]
     tb = tb.sort_values(["prioridad", "nota_confiabilidad"])
-    cols = ["suministro", "tipo_local", "gateway", "nota_confiabilidad", "AQUA TRUST", "AQUA CLUSTER",
+    cols = ["suministro", "tipo_local", "gateway", "nota_confiabilidad", "Nivel (AQUA TRUST)", "Antena (AQUA CLUSTER)",
             "motivo_nota", "retrocesos", "dias_plano", "horas_sin_tx"]
     vis = tb[cols].rename(columns={"suministro": "Suministro", "tipo_local": "Tipo de local (sim.)",
-                                   "gateway": "Antena", "nota_confiabilidad": "Nota (0–100)",
+                                   "gateway": "Antena", "nota_confiabilidad": "Confiabilidad (0–100)",
                                    "motivo_nota": "Por qué", "retrocesos": "Retrocesos",
                                    "dias_plano": "Días con índice plano", "horas_sin_tx": "Horas sin transmitir"})
     vis["Días con índice plano"] = vis["Días con índice plano"].round(0)
     vis["Horas sin transmitir"] = vis["Horas sin transmitir"].round(0)
     _df(vis.head(500), hide_index=True, height=420, column_config={
-        "Nota (0–100)": st.column_config.ProgressColumn("Nota (0–100)", min_value=0, max_value=100, format="%d"),
+        "Confiabilidad (0–100)": st.column_config.ProgressColumn("Confiabilidad (0–100)", min_value=0, max_value=100, format="%d"),
     })
     st.caption(f"{len(tb):,} suministros en la tabla (se muestran hasta 500).")
 
@@ -1023,15 +1092,22 @@ def vista_sedapal(maestro, base, casos, antenas):
     with t2:
         tc = ab.sort_values(["prioridad", "dias_abiertos"], ascending=[True, False])
         _df(tc[["caso", "suministro", "tipo_local", "anomalia", "responsable", "estado",
-                "dias_abiertos", "soles_riesgo"]].rename(columns={
-            "caso": "Caso", "suministro": "Suministro", "tipo_local": "Tipo (sim.)", "anomalia": "Anomalía",
+                "dias_abiertos", "soles_riesgo", "respuesta_cliente"]].rename(columns={
+            "respuesta_cliente": "Respuesta del cliente", "caso": "Caso", "suministro": "Suministro", "tipo_local": "Tipo (sim.)", "anomalia": "Anomalía",
             "responsable": "Responsable", "estado": "Estado", "dias_abiertos": "Días abiertos",
             "soles_riesgo": "Soles en riesgo"}), hide_index=True, height=360)
         if len(tc):
-            sel = st.selectbox("Cerrar caso (demo): resultado se registra y recalibra umbrales", tc["caso"].tolist())
-            if st.button("Cerrar caso"):
-                st.session_state.setdefault("cerrados", []).append(sel)
+            st.markdown("**Acción de Sedapal (ESCE) sobre un caso**")
+            g1, g2, g3 = st.columns([2, 2, 2])
+            sel = g1.selectbox("Caso", tc["caso"].tolist())
+            accion = g2.selectbox("Acción", ["Confirmar hallazgo en terreno (Verificada)", "Cerrar caso"])
+            resultado = g3.selectbox("Resultado", ["Fuga confirmada", "Medidor reparado", "Falsa alarma", "Local sin uso"])
+            if st.button("Registrar"):
+                cierra = accion.startswith("Cerrar")
+                st.session_state.setdefault("sedapal", {})[sel] = {
+                    "estado": "Cerrada" if cierra else "Verificada", "resultado": resultado}
                 st.rerun()
+            st.caption("Cada cierre registra el resultado (fuga, medidor, falsa alarma o local sin uso) y recalibra los umbrales.")
 
 
 # =============================================================================
